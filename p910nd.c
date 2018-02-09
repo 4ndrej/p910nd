@@ -16,6 +16,12 @@
  *	Port 9100+n will then be passively opened
  *	n defaults to 0
  *
+ *	Version 0.97
+ *	Patches by Stefan Sichler.
+ *	Stream to printer is only closed after EOF from network if 
+ *	it is no more busy, otherwise printer driver may discard data of last 
+ *	write() at close().
+ *
  *	Version 0.96
  *	Patches by Stefan Sichler.
  *	Fixed bi-directional mode to stay alive until connection is closed.
@@ -150,13 +156,14 @@ typedef struct {
 	int bytes;		/* The number of bytes currently buffered. */
 	int totalin;		/* Total bytes that have been read. */
 	int totalout;		/* Total bytes that have been written. */
-	int eof;		/* Nonzero indicates the input file has reached EOF. */
+	int eof_read;		/* Nonzero indicates the input file has reached EOF. */
+	int eof_sent;		/* Nonzero indicates the output file has fully received all data. */
 	int err;		/* Nonzero indicates an error detected on the output file. */
 	char buffer[BUFFER_SIZE];	/* Buffered data goes here. */
 } Buffer_t;
 
 static char *progname;
-static char version[] = "Version 0.96";
+static char version[] = "Version 0.97";
 static char copyright[] = "Copyright (c) 2008-2014 Ken Yap and others, GPLv2";
 static int lockfd = -1;
 static char *device = 0;
@@ -278,17 +285,18 @@ void initBuffer(Buffer_t * b, int infd, int outfd, int detectEof)
 	b->bytes = 0;
 	b->totalin = 0;
 	b->totalout = 0;
-	b->eof = 0;
+	b->eof_read = 0;
+	b->eof_sent = 0;
 	b->err = 0;
 }
 
 /* Sets the readfds and writefds (used by select) based on current buffer state. */
 void prepBuffer(Buffer_t * b, fd_set * readfds, fd_set * writefds)
 {
-	if (b->outfd>=0 && !b->err && b->bytes != 0) {
+	if (b->outfd>=0 && !b->err && (b->bytes != 0 || b->eof_read)) {
 		FD_SET(b->outfd, writefds);
 	}
-	if (b->infd>=0 && !b->eof && b->bytes < sizeof(b->buffer)) {
+	if (b->infd>=0 && !b->eof_read && b->bytes < sizeof(b->buffer)) {
 		FD_SET(b->infd, readfds);
 	}
 }
@@ -324,16 +332,13 @@ ssize_t readBuffer(Buffer_t * b)
 				/* Time to wrap the buffer. */
 				b->endidx = 0;
 			}
-		} else if (b->bytes==0) {
-			if (result < 0) {
-				dolog(LOGOPTS, "read: %m\n");
-				b->err = 1;
-				b->eof = 1;
-			}
-			else if (b->detectEof) {
-				dolog(LOG_DEBUG, "read: eof\n");
-				b->eof = 1;
-			}
+		} else if (result < 0) {
+			dolog(LOGOPTS, "read: %m\n");
+			b->err = 1;
+		}
+		else if (b->detectEof) {
+			dolog(LOG_DEBUG, "read: eof\n");
+			b->eof_read = 1;
 		} else
 			result = 0; // in case there is still data in the buffer, ignore the error by now
 	}
@@ -368,7 +373,8 @@ ssize_t writeBuffer(Buffer_t * b)
 		} else {
 			/* Zero or more bytes were written. */
 			b->startidx += result;
-			b->totalout += result;
+			if (b->outfd>=0)
+				b->totalout += result;
 			b->bytes -= result;
 			if (b->startidx == sizeof(b->buffer)) {
 				/* Unwrap the buffer. */
@@ -376,6 +382,9 @@ ssize_t writeBuffer(Buffer_t * b)
 			}
 		}
 	}
+	else if (b->eof_read)
+		b->eof_sent = 1;
+	
 	/* Return the write() result, -1 (error) or #bytes written. */
 	return result;
 }
@@ -399,7 +408,7 @@ int copy_stream(int fd, int lp)
 		fd_set writefds;
 		/* Finish when network sent EOF. */
 		/* Although the printer to network stream may not be finished (does this matter?) */
-		while (!networkToPrinterBuffer.eof && !networkToPrinterBuffer.err) {
+		while (!networkToPrinterBuffer.eof_sent && !networkToPrinterBuffer.err) {
 			FD_ZERO(&readfds);
 			FD_ZERO(&writefds);
 			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
@@ -467,11 +476,11 @@ int copy_stream(int fd, int lp)
 			}
 		}
 		dolog(LOG_NOTICE,
-		       "Finished job: %d bytes received, %d bytes sent\n",
-		       networkToPrinterBuffer.totalout, printerToNetworkBuffer.totalout);
+		       "Finished job: %d/%d bytes sent to printer, %d/%d bytes sent to network\n",
+		       networkToPrinterBuffer.totalout,networkToPrinterBuffer.totalin, printerToNetworkBuffer.totalout, printerToNetworkBuffer.totalin);
 	} else {
 		/* Unidirectional: simply read from network, and write to printer. */
-		while (!networkToPrinterBuffer.eof && !networkToPrinterBuffer.err) {
+		while (!networkToPrinterBuffer.eof_sent && !networkToPrinterBuffer.err) {
 			result = readBuffer(&networkToPrinterBuffer);
 			if (result > 0)
 				dolog(LOG_DEBUG,"read %d bytes from network\n",result);
@@ -479,7 +488,7 @@ int copy_stream(int fd, int lp)
 			if (result > 0)
 				dolog(LOG_DEBUG,"wrote %d bytes to printer\n",result);
 		}
-		dolog(LOG_NOTICE, "Finished job: %d bytes received\n", networkToPrinterBuffer.totalout);
+		dolog(LOG_NOTICE, "Finished job: %d/%d bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
 	}
 	return (networkToPrinterBuffer.err?-1:0);
 }
