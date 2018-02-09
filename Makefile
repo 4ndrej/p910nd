@@ -1,4 +1,4 @@
-# Comment out line bellow if you don't want to use 
+# Define USE_WRAP if you want to compile with
 # libwrap (hosts.{allow,deny} access control)
 ifneq ($(USE_WRAP),)
 LIBS += -lwrap
