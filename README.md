@@ -6,3 +6,6 @@ p910nd is released under the GPLv2.
 [Sourceforge project page](http://sourceforge.net/projects/p910nd/)
 
 Last updated 2014-01-11 by Ken Yap
+
+---
+> Desclaimer: This repo is reconstruction of code changes published at the sourceforge project homepage.
